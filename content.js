@@ -9,6 +9,10 @@
   const MAX_ITEMS = 80;
   const NATIVE_OUTLINE_STYLE_ID = "cgpt-native-outline-blocker-style";
   const NATIVE_OUTLINE_HIDDEN_ATTR = "data-cgpt-native-outline-hidden";
+  const NATIVE_OUTLINE_BLOCK_DELAY_MS = 120;
+  const USER_PROMPT_OUTLINE_MIN_MATCHES = 2;
+  const USER_PROMPT_SNIPPET_MIN_LENGTH = 6;
+  const USER_PROMPT_SNIPPET_MAX_LENGTH = 48;
   const NATIVE_OUTLINE_TERMS = [
     "outline",
     "conversation outline",
@@ -23,6 +27,7 @@
     items: [],
     activeId: null,
     mutationTimer: null,
+    nativeOutlineTimer: null,
     mutationObserver: null,
     intersectionObserver: null,
     scrollAnimationFrame: null
@@ -74,7 +79,7 @@
       });
 
       if (changedOutsideOutline) {
-        hideNativeChatGptOutline();
+        scheduleNativeOutlineBlocker();
         scheduleUpdate();
       }
     });
@@ -121,6 +126,11 @@
     });
   }
 
+  function scheduleNativeOutlineBlocker() {
+    clearTimeout(state.nativeOutlineTimer);
+    state.nativeOutlineTimer = setTimeout(hideNativeChatGptOutline, NATIVE_OUTLINE_BLOCK_DELAY_MS);
+  }
+
   function findNativeOutlineCandidates() {
     const exactSelectorCandidates = Array.from(document.querySelectorAll([
       '[data-testid*="outline" i]',
@@ -139,7 +149,17 @@
       '[role="complementary"]'
     ].join(","))).filter(isNativeOutlineLikeContainer);
 
-    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates))
+    const promptOutlineCandidates = Array.from(document.body.querySelectorAll([
+      "aside",
+      "nav",
+      '[role="navigation"]',
+      '[role="complementary"]',
+      "[data-testid]",
+      "[aria-label]",
+      "div"
+    ].join(","))).filter(isNativeUserPromptOutlineLikeContainer);
+
+    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, promptOutlineCandidates))
       .filter((element) => !isInsideExtension(element) && !isInsideMessage(element));
   }
 
@@ -175,7 +195,7 @@
 
   function isNativeOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
-    if (!hasNativeOutlineSignal(element)) return false;
+    if (!hasNativeOutlineSignal(element) && !hasUserPromptOutlineSignal(element)) return false;
 
     const tag = element.tagName.toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
@@ -195,8 +215,15 @@
       role === "navigation" ||
       role === "complementary";
 
-    return (isSemanticNav && hasNativeOutlineSignal(element)) ||
+    return (isSemanticNav && (hasNativeOutlineSignal(element) || hasUserPromptOutlineSignal(element))) ||
       isFixedOrStickySidePanel(element);
+  }
+
+  function isNativeUserPromptOutlineLikeContainer(element) {
+    if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
+    if (!isVisible(element)) return false;
+    if (!isFixedOrStickySidePanel(element)) return false;
+    return getUserPromptMatchCount(element) > 0;
   }
 
   function hasNativeOutlineSignal(element) {
@@ -205,10 +232,69 @@
       element.getAttribute("data-testid"),
       element.getAttribute("id"),
       element.className,
-      element.innerText
+      element.innerText,
+      element.textContent
     ].filter(Boolean).join(" ")).toLowerCase();
 
     return NATIVE_OUTLINE_TERMS.some((term) => signal.includes(term));
+  }
+
+  function hasUserPromptOutlineSignal(element) {
+    return getUserPromptMatchCount(element) >= USER_PROMPT_OUTLINE_MIN_MATCHES;
+  }
+
+  function getUserPromptMatchCount(element) {
+    const userSnippets = getUserPromptSnippets();
+    if (!userSnippets.length) return 0;
+
+    const text = normalizeForPromptMatch(element.innerText || element.textContent || "");
+    if (!text) return 0;
+
+    let matches = 0;
+    for (const snippets of userSnippets) {
+      if (!snippets.some((snippet) => snippet && text.includes(snippet))) continue;
+      matches += 1;
+      if (matches >= USER_PROMPT_OUTLINE_MIN_MATCHES) return matches;
+    }
+
+    return matches;
+  }
+
+  function getUserPromptSnippets() {
+    const main = document.querySelector("main") || document.body;
+    const seen = new Set();
+
+    return Array.from(main.querySelectorAll('[data-message-author-role="user"]'))
+      .map((element) => {
+        return normalizeText(element.innerText || element.textContent || "");
+      })
+      .filter((text) => text.length >= USER_PROMPT_SNIPPET_MIN_LENGTH)
+      .map((text) => {
+        const normalized = normalizeForPromptMatch(text);
+        return [
+          normalized.slice(0, USER_PROMPT_SNIPPET_MAX_LENGTH),
+          normalized.slice(0, 32),
+          normalized.slice(0, 20),
+          normalized.slice(0, 12)
+        ].map(normalizeForPromptMatch).filter((snippet) => {
+          return snippet.length >= USER_PROMPT_SNIPPET_MIN_LENGTH;
+        });
+      })
+      .filter((snippets) => {
+        if (!snippets.length) return false;
+        const key = snippets[0];
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
+  function normalizeForPromptMatch(text) {
+    return normalizeText(text)
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   function isFixedOrStickySidePanel(element) {
