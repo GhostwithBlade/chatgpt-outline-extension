@@ -1,5 +1,7 @@
 # ChatGPT Outline
 
+[中文说明](README.zh-CN.md)
+
 A minimal Chrome Manifest V3 extension that adds a Notion-style assistant response outline to ChatGPT pages.
 
 ## What it does
