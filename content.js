@@ -101,13 +101,7 @@
       body [data-testid="conversation-outline"],
       body [data-testid="thread-outline"],
       body [data-testid="conversation-toc"],
-      body [data-testid="table-of-contents"],
-      body [aria-label="Outline" i]:not(#${ROOT_ID}),
-      body [aria-label="Conversation outline" i],
-      body [aria-label="Thread outline" i],
-      body [aria-label="Table of contents" i],
-      body [aria-label="大纲"],
-      body [aria-label="目录"] {
+      body [data-testid="table-of-contents"] {
         display: none !important;
       }
     `;
@@ -115,6 +109,8 @@
   }
 
   function hideNativeChatGptOutline() {
+    restoreProtectedLeftSidebar();
+
     const candidates = findNativeOutlineCandidates();
 
     candidates.forEach((element) => {
@@ -160,11 +156,15 @@
     ].join(","))).filter(isNativeUserPromptOutlineLikeContainer);
 
     return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, promptOutlineCandidates))
-      .filter((element) => !isInsideExtension(element) && !isInsideMessage(element));
+      .filter((element) => {
+        return !isInsideExtension(element) &&
+          !isInsideMessage(element) &&
+          !hasProtectedLeftSidebarAncestor(element);
+      });
   }
 
   function getNativeOutlineHideTarget(element) {
-    if (!element || isInsideExtension(element) || isInsideMessage(element)) return null;
+    if (!element || isInsideExtension(element) || isInsideMessage(element) || hasProtectedLeftSidebarAncestor(element)) return null;
 
     if (isNativeOutlineLikeContainer(element)) return element;
 
@@ -186,6 +186,7 @@
 
     while (current && current !== document.body && current !== document.documentElement) {
       if (isInsideExtension(current) || isInsideMessage(current)) return null;
+      if (isProtectedLeftSidebar(current)) return null;
       if (isSidePanelContainer(current)) return current;
       current = current.parentElement;
     }
@@ -195,6 +196,7 @@
 
   function isNativeOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
+    if (isProtectedLeftSidebar(element)) return false;
     if (!hasNativeOutlineSignal(element) && !hasUserPromptOutlineSignal(element)) return false;
 
     const tag = element.tagName.toLowerCase();
@@ -204,10 +206,12 @@
       role === "navigation" ||
       role === "complementary";
 
-    return isSemanticNav || isFixedOrStickySidePanel(element);
+    return isSemanticNav || isFixedOrStickySidePanel(element, { side: "right" });
   }
 
   function isSidePanelContainer(element) {
+    if (isProtectedLeftSidebar(element)) return false;
+
     const tag = element.tagName.toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
     const isSemanticNav = tag === "aside" ||
@@ -216,14 +220,71 @@
       role === "complementary";
 
     return (isSemanticNav && (hasNativeOutlineSignal(element) || hasUserPromptOutlineSignal(element))) ||
-      isFixedOrStickySidePanel(element);
+      isFixedOrStickySidePanel(element, { side: "right" });
   }
 
   function isNativeUserPromptOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (!isVisible(element)) return false;
-    if (!isFixedOrStickySidePanel(element)) return false;
+    if (hasProtectedLeftSidebarAncestor(element)) return false;
+    if (!isFixedOrStickySidePanel(element, { side: "right" })) return false;
     return getUserPromptMatchCount(element) > 0;
+  }
+
+  function restoreProtectedLeftSidebar() {
+    document.querySelectorAll(`[${NATIVE_OUTLINE_HIDDEN_ATTR}="true"]`).forEach((element) => {
+      if (!isProtectedLeftSidebar(element)) return;
+
+      element.removeAttribute(NATIVE_OUTLINE_HIDDEN_ATTR);
+      if (element.style.getPropertyValue("display") === "none") {
+        element.style.removeProperty("display");
+      }
+    });
+  }
+
+  function hasProtectedLeftSidebarAncestor(element) {
+    return Boolean(element.closest?.("aside, nav, [role='navigation'], [role='complementary']") &&
+      findProtectedLeftSidebarAncestor(element));
+  }
+
+  function findProtectedLeftSidebarAncestor(element) {
+    let current = element;
+
+    while (current && current !== document.body && current !== document.documentElement) {
+      if (isProtectedLeftSidebar(current)) return current;
+      current = current.parentElement;
+    }
+
+    return null;
+  }
+
+  function isProtectedLeftSidebar(element) {
+    if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
+
+    const tag = element.tagName.toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    const isSemanticSidebar = tag === "aside" ||
+      tag === "nav" ||
+      role === "navigation" ||
+      role === "complementary";
+
+    if (!isSemanticSidebar) return false;
+
+    const descriptor = normalizeText([
+      element.getAttribute("aria-label"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("id"),
+      element.className
+    ].filter(Boolean).join(" ")).toLowerCase();
+
+    if (/(sidebar|side-bar|history|left)/.test(descriptor)) return true;
+    if (element.querySelector?.('a[href^="/c/"], a[href="/"], a[href^="/g/"], [data-testid*="history" i], [data-testid*="conversation" i]')) return true;
+
+    const alignment = getFixedOrStickySidePanelAlignment(element);
+    if (alignment !== "left") return false;
+
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 160 && rect.height >= Math.min(window.innerHeight * 0.5, 420);
   }
 
   function hasNativeOutlineSignal(element) {
@@ -297,18 +358,27 @@
       .trim();
   }
 
-  function isFixedOrStickySidePanel(element) {
+  function isFixedOrStickySidePanel(element, options = {}) {
+    const alignment = getFixedOrStickySidePanelAlignment(element);
+    if (!alignment) return false;
+    if (options.side) return alignment === options.side;
+    return true;
+  }
+
+  function getFixedOrStickySidePanelAlignment(element) {
     const style = window.getComputedStyle(element);
-    if (style.position !== "fixed" && style.position !== "sticky") return false;
+    if (style.position !== "fixed" && style.position !== "sticky") return null;
 
     const rect = element.getBoundingClientRect();
-    const isSideAligned = rect.right >= window.innerWidth - 360 || rect.left <= 360;
     const isPanelSized = rect.width >= 24 &&
       rect.width <= 420 &&
       rect.height >= 24 &&
       rect.height <= window.innerHeight;
 
-    return isSideAligned && isPanelSized;
+    if (!isPanelSized) return null;
+    if (rect.right >= window.innerWidth - 360) return "right";
+    if (rect.left <= 360) return "left";
+    return null;
   }
 
   function isInsideExtension(element) {

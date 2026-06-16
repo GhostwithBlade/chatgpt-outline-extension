@@ -43,7 +43,7 @@
 - `content.js`：页面注入逻辑、标题提取、滚动定位、官方大纲屏蔽逻辑。
 - `content.css`：右侧大纲栏样式。
 - `icons/`：扩展图标。
-- `chatgpt-outline-v0.1.0.zip`：打包后的扩展文件。
+- `chatgpt-outline-v0.1.1.zip`：打包后的扩展文件。
 
 ## 已知限制
 
