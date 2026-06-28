@@ -2,7 +2,7 @@
   "use strict";
 
   const ROOT_ID = "cgpt-outline-root";
-  const EXTENSION_VERSION = "0.1.18";
+  const EXTENSION_VERSION = "0.1.19";
   const UPDATE_DELAY_MS = 450;
   const SCROLL_UPDATE_DELAY_MS = 120;
   const PERIODIC_UPDATE_MS = 650;
@@ -25,6 +25,7 @@
   const RIGHT_SIDE_PANEL_MIN_HEIGHT = 56;
   const RIGHT_SIDE_PANEL_EDGE_GAP = 48;
   const RIGHT_SIDE_PANEL_COLUMN_GAP = 12;
+  const NATIVE_PROMPT_RAIL_MIN_BUTTONS = 2;
   const NATIVE_OUTLINE_TERMS = [
     "outline",
     "conversation outline",
@@ -220,8 +221,15 @@
       "[aria-label]",
       "div"
     ].join(","))).filter(isNativeConversationOutlineLikeContainer);
+    const promptRailCandidates = Array.from(document.body.querySelectorAll([
+      "aside",
+      "nav",
+      '[role="navigation"]',
+      '[role="complementary"]',
+      "div"
+    ].join(","))).filter(isNativePromptRailContainer);
 
-    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, conversationOutlineCandidates))
+    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, conversationOutlineCandidates, promptRailCandidates))
       .filter((element) => {
         return !isInsideExtension(element) &&
           !isInsideMessage(element) &&
@@ -232,6 +240,7 @@
   function getNativeOutlineHideTarget(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element) || hasProtectedLeftSidebarAncestor(element)) return null;
 
+    if (isNativePromptRailContainer(element)) return element;
     if (isNativeOutlineLikeContainer(element)) return element;
 
     const sidePanel = findSidePanelAncestor(element);
@@ -302,6 +311,44 @@
     if (hasProtectedLeftSidebarAncestor(element)) return false;
     if (!isFixedOrStickySidePanel(element, { side: "right" }) && !isRightSideLayoutPanel(element)) return false;
     return hasConversationOutlineSignal(element);
+  }
+
+  function isNativePromptRailContainer(element) {
+    if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
+    if (!isVisible(element)) return false;
+    if (isProtectedLeftSidebar(element) || hasProtectedLeftSidebarAncestor(element)) return false;
+    if (!isFixedOrStickySidePanel(element, { side: "right" })) return false;
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 24 || rect.width > 120) return false;
+    if (rect.height < 24 || rect.height > Math.min(window.innerHeight, 520)) return false;
+
+    const buttons = Array.from(element.querySelectorAll("button[aria-label], button[title]"))
+      .filter(isNativePromptRailButton);
+
+    if (buttons.length < NATIVE_PROMPT_RAIL_MIN_BUTTONS) return false;
+
+    const text = normalizeText(element.innerText || element.textContent || "");
+    return text.length === 0;
+  }
+
+  function isNativePromptRailButton(button) {
+    if (!button || isInsideExtension(button) || !isVisible(button)) return false;
+
+    const label = normalizeText([
+      button.getAttribute("aria-label"),
+      button.getAttribute("title")
+    ].filter(Boolean).join(" "));
+    if (!/^(prompt|提示)\s*\d+$/i.test(label)) return false;
+
+    const rect = button.getBoundingClientRect();
+    const isSmallHorizontalBar = rect.width >= 8 &&
+      rect.width <= 64 &&
+      rect.height > 0 &&
+      rect.height <= 12 &&
+      rect.width > rect.height;
+
+    return isSmallHorizontalBar;
   }
 
   function restoreProtectedLeftSidebar() {
@@ -582,6 +629,7 @@
   }
 
   function updateOutline() {
+    hideNativeChatGptOutline();
     refreshScrollContainers();
 
     const nextItems = buildOutline();
