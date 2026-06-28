@@ -2,8 +2,13 @@
   "use strict";
 
   const ROOT_ID = "cgpt-outline-root";
+  const EXTENSION_VERSION = "0.1.18";
   const UPDATE_DELAY_MS = 450;
+  const SCROLL_UPDATE_DELAY_MS = 120;
+  const PERIODIC_UPDATE_MS = 650;
   const JUMP_DURATION_MS = 260;
+  const ACTIVE_LOCK_MS = 900;
+  const OUTLINE_CARD_CLOSE_DELAY_MS = 180;
   const MIN_JUMP_TOP_OFFSET = 88;
   const JUMP_TOP_GAP = 36;
   const MAX_ITEMS = 80;
@@ -13,6 +18,13 @@
   const USER_PROMPT_OUTLINE_MIN_MATCHES = 2;
   const USER_PROMPT_SNIPPET_MIN_LENGTH = 6;
   const USER_PROMPT_SNIPPET_MAX_LENGTH = 48;
+  const ASSISTANT_HEADING_OUTLINE_MIN_MATCHES = 2;
+  const ASSISTANT_HEADING_SNIPPET_MIN_LENGTH = 4;
+  const ASSISTANT_HEADING_SNIPPET_MAX_LENGTH = 64;
+  const RIGHT_SIDE_PANEL_MAX_WIDTH = 560;
+  const RIGHT_SIDE_PANEL_MIN_HEIGHT = 56;
+  const RIGHT_SIDE_PANEL_EDGE_GAP = 48;
+  const RIGHT_SIDE_PANEL_COLUMN_GAP = 12;
   const NATIVE_OUTLINE_TERMS = [
     "outline",
     "conversation outline",
@@ -28,45 +40,74 @@
     activeId: null,
     mutationTimer: null,
     nativeOutlineTimer: null,
+    scrollTimer: null,
+    periodicTimer: null,
+    cardCloseTimer: null,
+    scrollContainers: new Set(),
     mutationObserver: null,
     intersectionObserver: null,
-    scrollAnimationFrame: null
+    scrollAnimationFrame: null,
+    outlineSignature: null,
+    activeLockedUntil: 0
   };
 
   init();
 
   function init() {
-    if (document.getElementById(ROOT_ID)) return;
+    const existingRoot = document.getElementById(ROOT_ID);
+    if (existingRoot) {
+      existingRoot.remove();
+    }
 
     injectNativeOutlineBlockerStyle();
     hideNativeChatGptOutline();
     injectOutline();
     updateOutline();
     observePageChanges();
+    observeScrollChanges();
+    observePeriodicChanges();
   }
 
   function injectOutline() {
     const root = document.createElement("aside");
     root.id = ROOT_ID;
     root.className = "cgpt-outline";
+    root.dataset.cgptOutlineVersion = EXTENSION_VERSION;
     root.setAttribute("aria-label", "Assistant response outline");
     root.innerHTML = `
       <div class="cgpt-outline__rail" aria-hidden="false"></div>
+      <div class="cgpt-outline__bridge" aria-hidden="true"></div>
       <nav class="cgpt-outline__card" aria-label="Assistant headings"></nav>
     `;
 
     document.documentElement.appendChild(root);
 
-    root.addEventListener("click", (event) => {
-      const target = event.target.closest("[data-outline-id]");
-      if (!target) return;
+    root.addEventListener("click", handleOutlineClick);
+    bindOutlineHover(root);
+  }
 
-      const item = findItemById(target.dataset.outlineId);
-      if (!item?.element?.isConnected) return;
+  function bindOutlineHover(root) {
+    const interactiveElements = root.querySelectorAll(".cgpt-outline__rail, .cgpt-outline__bridge, .cgpt-outline__card");
 
-      scrollToElement(item.element);
-      setActive(item.id);
+    interactiveElements.forEach((element) => {
+      element.addEventListener("mouseenter", openOutlineCard);
+      element.addEventListener("mouseleave", scheduleOutlineCardClose);
     });
+
+    root.addEventListener("focusin", openOutlineCard);
+    root.addEventListener("focusout", scheduleOutlineCardClose);
+  }
+
+  function openOutlineCard() {
+    clearTimeout(state.cardCloseTimer);
+    document.getElementById(ROOT_ID)?.classList.add("is-open");
+  }
+
+  function scheduleOutlineCardClose() {
+    clearTimeout(state.cardCloseTimer);
+    state.cardCloseTimer = setTimeout(() => {
+      document.getElementById(ROOT_ID)?.classList.remove("is-open");
+    }, OUTLINE_CARD_CLOSE_DELAY_MS);
   }
 
   function observePageChanges() {
@@ -91,11 +132,36 @@
     });
   }
 
+  function observeScrollChanges() {
+    refreshScrollContainers();
+
+    window.addEventListener("scroll", scheduleScrollUpdate, {
+      capture: true,
+      passive: true
+    });
+    document.addEventListener("scroll", scheduleScrollUpdate, {
+      capture: true,
+      passive: true
+    });
+  }
+
+  function observePeriodicChanges() {
+    clearInterval(state.periodicTimer);
+    state.periodicTimer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      updateOutline();
+    }, PERIODIC_UPDATE_MS);
+  }
+
   function injectNativeOutlineBlockerStyle() {
-    if (document.getElementById(NATIVE_OUTLINE_STYLE_ID)) return;
+    const existingStyle = document.getElementById(NATIVE_OUTLINE_STYLE_ID);
+    if (existingStyle) {
+      existingStyle.remove();
+    }
 
     const style = document.createElement("style");
     style.id = NATIVE_OUTLINE_STYLE_ID;
+    style.dataset.cgptOutlineVersion = EXTENSION_VERSION;
     style.textContent = `
       [${NATIVE_OUTLINE_HIDDEN_ATTR}="true"],
       body [data-testid="conversation-outline"],
@@ -145,7 +211,7 @@
       '[role="complementary"]'
     ].join(","))).filter(isNativeOutlineLikeContainer);
 
-    const promptOutlineCandidates = Array.from(document.body.querySelectorAll([
+    const conversationOutlineCandidates = Array.from(document.body.querySelectorAll([
       "aside",
       "nav",
       '[role="navigation"]',
@@ -153,9 +219,9 @@
       "[data-testid]",
       "[aria-label]",
       "div"
-    ].join(","))).filter(isNativeUserPromptOutlineLikeContainer);
+    ].join(","))).filter(isNativeConversationOutlineLikeContainer);
 
-    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, promptOutlineCandidates))
+    return uniqueOuterElements(exactSelectorCandidates.concat(containerCandidates, conversationOutlineCandidates))
       .filter((element) => {
         return !isInsideExtension(element) &&
           !isInsideMessage(element) &&
@@ -170,6 +236,7 @@
 
     const sidePanel = findSidePanelAncestor(element);
     if (sidePanel) return sidePanel;
+    if (isNativeConversationOutlineLikeContainer(element)) return element;
 
     let current = element.parentElement;
     while (current && current !== document.body && current !== document.documentElement) {
@@ -182,12 +249,13 @@
   }
 
   function findSidePanelAncestor(element) {
+    const candidateHasNativeSignal = hasNativeOutlineSignal(element);
     let current = element.parentElement;
 
     while (current && current !== document.body && current !== document.documentElement) {
       if (isInsideExtension(current) || isInsideMessage(current)) return null;
       if (isProtectedLeftSidebar(current)) return null;
-      if (isSidePanelContainer(current)) return current;
+      if (isSidePanelContainer(current, { allowPositionalMatch: candidateHasNativeSignal })) return current;
       current = current.parentElement;
     }
 
@@ -197,7 +265,7 @@
   function isNativeOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (isProtectedLeftSidebar(element)) return false;
-    if (!hasNativeOutlineSignal(element) && !hasUserPromptOutlineSignal(element)) return false;
+    if (!hasNativeOutlineSignal(element) && !hasConversationOutlineSignal(element)) return false;
 
     const tag = element.tagName.toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
@@ -206,10 +274,12 @@
       role === "navigation" ||
       role === "complementary";
 
-    return isSemanticNav || isFixedOrStickySidePanel(element, { side: "right" });
+    return isSemanticNav ||
+      isFixedOrStickySidePanel(element, { side: "right" }) ||
+      isRightSideLayoutPanel(element);
   }
 
-  function isSidePanelContainer(element) {
+  function isSidePanelContainer(element, options = {}) {
     if (isProtectedLeftSidebar(element)) return false;
 
     const tag = element.tagName.toLowerCase();
@@ -219,16 +289,19 @@
       role === "navigation" ||
       role === "complementary";
 
-    return (isSemanticNav && (hasNativeOutlineSignal(element) || hasUserPromptOutlineSignal(element))) ||
-      isFixedOrStickySidePanel(element, { side: "right" });
+    const hasOutlineSignal = hasNativeOutlineSignal(element) || hasConversationOutlineSignal(element);
+
+    return (isSemanticNav && hasOutlineSignal) ||
+      (options.allowPositionalMatch && isFixedOrStickySidePanel(element, { side: "right" })) ||
+      (hasOutlineSignal && (isFixedOrStickySidePanel(element, { side: "right" }) || isRightSideLayoutPanel(element)));
   }
 
-  function isNativeUserPromptOutlineLikeContainer(element) {
+  function isNativeConversationOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (!isVisible(element)) return false;
     if (hasProtectedLeftSidebarAncestor(element)) return false;
-    if (!isFixedOrStickySidePanel(element, { side: "right" })) return false;
-    return getUserPromptMatchCount(element) > 0;
+    if (!isFixedOrStickySidePanel(element, { side: "right" }) && !isRightSideLayoutPanel(element)) return false;
+    return hasConversationOutlineSignal(element);
   }
 
   function restoreProtectedLeftSidebar() {
@@ -288,34 +361,60 @@
   }
 
   function hasNativeOutlineSignal(element) {
-    const signal = normalizeText([
+    const metadataSignal = normalizeText([
       element.getAttribute("aria-label"),
       element.getAttribute("data-testid"),
-      element.getAttribute("id"),
-      element.className,
+      element.getAttribute("id")
+    ].filter(Boolean).join(" ")).toLowerCase();
+    const classSignal = normalizeText(
+      Array.from(element.classList || [])
+        .filter((className) => /(^|[-_:])(outline|toc|table-of-contents)([-_:]|$)/i.test(className))
+        .filter((className) => !/(^|[-_:])outline-none($|[-_:])/i.test(className))
+        .join(" ")
+    ).toLowerCase();
+    const textSignal = normalizeText([
       element.innerText,
       element.textContent
     ].filter(Boolean).join(" ")).toLowerCase();
 
-    return NATIVE_OUTLINE_TERMS.some((term) => signal.includes(term));
+    return NATIVE_OUTLINE_TERMS.some((term) => {
+      return metadataSignal.includes(term) ||
+        classSignal.includes(term) ||
+        (term !== "outline" && textSignal.includes(term));
+    });
+  }
+
+  function hasConversationOutlineSignal(element) {
+    return hasUserPromptOutlineSignal(element) || hasAssistantHeadingOutlineSignal(element);
   }
 
   function hasUserPromptOutlineSignal(element) {
     return getUserPromptMatchCount(element) >= USER_PROMPT_OUTLINE_MIN_MATCHES;
   }
 
+  function hasAssistantHeadingOutlineSignal(element) {
+    return getAssistantHeadingMatchCount(element) >= ASSISTANT_HEADING_OUTLINE_MIN_MATCHES;
+  }
+
   function getUserPromptMatchCount(element) {
-    const userSnippets = getUserPromptSnippets();
-    if (!userSnippets.length) return 0;
+    return getSnippetMatchCount(element, getUserPromptSnippets(), USER_PROMPT_OUTLINE_MIN_MATCHES);
+  }
+
+  function getAssistantHeadingMatchCount(element) {
+    return getSnippetMatchCount(element, getAssistantHeadingSnippets(), ASSISTANT_HEADING_OUTLINE_MIN_MATCHES);
+  }
+
+  function getSnippetMatchCount(element, snippetGroups, maxMatches) {
+    if (!snippetGroups.length) return 0;
 
     const text = normalizeForPromptMatch(element.innerText || element.textContent || "");
     if (!text) return 0;
 
     let matches = 0;
-    for (const snippets of userSnippets) {
+    for (const snippets of snippetGroups) {
       if (!snippets.some((snippet) => snippet && text.includes(snippet))) continue;
       matches += 1;
-      if (matches >= USER_PROMPT_OUTLINE_MIN_MATCHES) return matches;
+      if (matches >= maxMatches) return matches;
     }
 
     return matches;
@@ -339,6 +438,34 @@
           normalized.slice(0, 12)
         ].map(normalizeForPromptMatch).filter((snippet) => {
           return snippet.length >= USER_PROMPT_SNIPPET_MIN_LENGTH;
+        });
+      })
+      .filter((snippets) => {
+        if (!snippets.length) return false;
+        const key = snippets[0];
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
+  function getAssistantHeadingSnippets() {
+    const main = document.querySelector("main") || document.body;
+    const seen = new Set();
+
+    return Array.from(main.querySelectorAll('[data-message-author-role="assistant"] h1, [data-message-author-role="assistant"] h2, [data-message-author-role="assistant"] h3'))
+      .map((element) => stripMarkdownPrefix(element.innerText || element.textContent || ""))
+      .map(normalizeText)
+      .filter((text) => text.length >= ASSISTANT_HEADING_SNIPPET_MIN_LENGTH)
+      .map((text) => {
+        const normalized = normalizeForPromptMatch(text);
+        return [
+          normalized.slice(0, ASSISTANT_HEADING_SNIPPET_MAX_LENGTH),
+          normalized.slice(0, 44),
+          normalized.slice(0, 28),
+          normalized.slice(0, 16)
+        ].map(normalizeForPromptMatch).filter((snippet) => {
+          return snippet.length >= ASSISTANT_HEADING_SNIPPET_MIN_LENGTH;
         });
       })
       .filter((snippets) => {
@@ -381,6 +508,61 @@
     return null;
   }
 
+  function isRightSideLayoutPanel(element) {
+    if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
+    if (!isVisible(element)) return false;
+    if (isProtectedLeftSidebar(element) || hasProtectedLeftSidebarAncestor(element)) return false;
+
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    const maxPanelHeight = Math.max(window.innerHeight * 1.35, 900);
+    const isPanelSized = rect.width >= 24 &&
+      rect.width <= RIGHT_SIDE_PANEL_MAX_WIDTH &&
+      rect.height >= RIGHT_SIDE_PANEL_MIN_HEIGHT &&
+      rect.height <= maxPanelHeight;
+    const isNearRightEdge = rect.right >= window.innerWidth - RIGHT_SIDE_PANEL_EDGE_GAP;
+    const isOutsideMainReadingColumn = rect.left >= Math.max(window.innerWidth * 0.58, 520);
+    const isRightOfConversationColumn = isRightOfMainConversationColumn(rect);
+    const isUsableDisplay = style.display !== "inline" && style.display !== "contents";
+
+    return isPanelSized &&
+      (isNearRightEdge || isOutsideMainReadingColumn || isRightOfConversationColumn) &&
+      isUsableDisplay;
+  }
+
+  function isRightOfMainConversationColumn(rect) {
+    const mainColumnRight = getMainConversationColumnRightEdge();
+    if (!mainColumnRight) return false;
+
+    return rect.left >= mainColumnRight - RIGHT_SIDE_PANEL_COLUMN_GAP &&
+      rect.left >= window.innerWidth * 0.42;
+  }
+
+  function getMainConversationColumnRightEdge() {
+    const main = document.querySelector("main") || document.body;
+    const maxContentWidth = Math.min(window.innerWidth * 0.82, 980);
+    const minContentWidth = Math.min(window.innerWidth * 0.32, 360);
+    const rightEdges = Array.from(main.querySelectorAll([
+      '[data-message-author-role="assistant"] .markdown',
+      '[data-message-author-role="assistant"] [data-testid="markdown"]',
+      '[data-message-author-role="assistant"] .prose',
+      '[data-message-author-role="user"]',
+      '[data-message-author-role="assistant"]'
+    ].join(","))).map((element) => {
+      return element.getBoundingClientRect();
+    }).filter((candidateRect) => {
+      return candidateRect.width >= minContentWidth &&
+        candidateRect.width <= maxContentWidth &&
+        candidateRect.height >= 24 &&
+        candidateRect.left < window.innerWidth * 0.62;
+    }).map((candidateRect) => {
+      return candidateRect.right;
+    }).sort((a, b) => a - b);
+
+    if (!rightEdges.length) return null;
+    return rightEdges[Math.floor(rightEdges.length / 2)];
+  }
+
   function isInsideExtension(element) {
     return element.id === ROOT_ID || Boolean(element.closest?.(`#${ROOT_ID}`));
   }
@@ -394,41 +576,136 @@
     state.mutationTimer = setTimeout(updateOutline, UPDATE_DELAY_MS);
   }
 
+  function scheduleScrollUpdate() {
+    clearTimeout(state.scrollTimer);
+    state.scrollTimer = setTimeout(updateOutline, SCROLL_UPDATE_DELAY_MS);
+  }
+
   function updateOutline() {
-    state.items = buildOutline();
-    renderOutline();
-    observeHeadings();
+    refreshScrollContainers();
+
+    const nextItems = buildOutline();
+    const nextSignature = getOutlineSignature(nextItems);
+    const outlineChanged = nextSignature !== state.outlineSignature;
+    const targetsChanged = !haveSameOutlineTargets(state.items, nextItems);
+
+    state.items = nextItems;
+    state.outlineSignature = nextSignature;
+
+    if (!state.items.some((item) => item.id === state.activeId)) {
+      state.activeId = null;
+      state.activeLockedUntil = 0;
+    }
+
+    if (!isActiveLocked()) {
+      state.activeId = getActiveIdByPosition() || state.activeId;
+    }
+
+    if (outlineChanged) {
+      renderOutline();
+    } else {
+      syncActiveElements();
+    }
+
+    if (outlineChanged || targetsChanged) {
+      observeHeadings();
+    } else if (!isActiveLocked()) {
+      updateActiveByPosition();
+    }
+  }
+
+  function getOutlineSignature(items) {
+    return items.map((item) => {
+      return `${item.id}\u0000${item.level}\u0000${item.title}`;
+    }).join("\u0001");
+  }
+
+  function haveSameOutlineTargets(previousItems, nextItems) {
+    if (previousItems.length !== nextItems.length) return false;
+
+    return previousItems.every((item, index) => {
+      const nextItem = nextItems[index];
+      return item.id === nextItem.id &&
+        item.element === nextItem.element;
+    });
+  }
+
+  function refreshScrollContainers() {
+    const nextContainers = new Set();
+
+    Array.from(document.body?.querySelectorAll("*") || []).forEach((element) => {
+      if (isScrollableElement(element)) {
+        nextContainers.add(element);
+      }
+    });
+
+    state.scrollContainers.forEach((element) => {
+      if (nextContainers.has(element) && element.isConnected) return;
+      element.removeEventListener("scroll", scheduleScrollUpdate, true);
+      state.scrollContainers.delete(element);
+    });
+
+    nextContainers.forEach((element) => {
+      if (state.scrollContainers.has(element)) return;
+      element.addEventListener("scroll", scheduleScrollUpdate, {
+        capture: true,
+        passive: true
+      });
+      state.scrollContainers.add(element);
+    });
+  }
+
+  function isScrollableElement(element) {
+    if (!element || element === document.body || element === document.documentElement) return false;
+    if (isInsideExtension(element)) return false;
+
+    const style = window.getComputedStyle(element);
+    if (!/(auto|scroll|overlay)/.test(style.overflowY)) return false;
+
+    return element.scrollHeight > element.clientHeight + 5;
   }
 
   function buildOutline() {
     const roots = findAssistantContentRoots();
-    const items = [];
-    const seen = new Set();
+    const headingElements = [];
 
-    roots.forEach((root, rootIndex) => {
+    roots.forEach((root) => {
       const candidates = getHeadingCandidates(root);
 
-      candidates.forEach((element, elementIndex) => {
+      candidates.forEach((element) => {
         if (!isUsableCandidate(element)) return;
+        headingElements.push(element);
+      });
+    });
 
+    const countsByHeading = new Map();
+    const items = uniqueElementsByIdentity(headingElements)
+      .sort(compareDocumentOrder)
+      .map((element) => {
         const heading = classifyHeading(element);
-        if (!heading) return;
+        if (!heading) return null;
 
-        const key = `${heading.level}-${heading.title}`;
-        if (seen.has(key)) return;
-        seen.add(key);
+        const headingKey = `${heading.level}-${heading.title}`;
+        const occurrence = countsByHeading.get(headingKey) || 0;
+        countsByHeading.set(headingKey, occurrence + 1);
 
-        const id = ensureTargetId(element, `cgpt-outline-h-${rootIndex}-${elementIndex}`);
-        items.push({
+        const id = getStableOutlineKey(heading, occurrence);
+        element.dataset.cgptOutlineId = id;
+
+        return {
           id,
           title: heading.title,
           level: heading.level,
           element
-        });
-      });
-    });
+        };
+      })
+      .filter(Boolean);
 
     return items.slice(0, MAX_ITEMS);
+  }
+
+  function getStableOutlineKey(heading, occurrence) {
+    return `cgpt-outline-h-${hashString(`${heading.level}-${heading.title}`)}-${occurrence}`;
   }
 
   function findAssistantContentRoots() {
@@ -543,6 +820,39 @@
         </button>
       `;
     }).join("");
+
+    syncActiveElements();
+  }
+
+  function handleOutlineClick(event) {
+    const target = event.currentTarget?.matches?.("[data-outline-id]")
+      ? event.currentTarget
+      : event.target.closest("[data-outline-id]");
+    if (!target) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const item = resolveOutlineItem(target);
+    if (!item?.element?.isConnected) return;
+
+    setActive(item.id, { lock: true, scrollCard: true });
+    scrollToElement(item.element, item.id);
+  }
+
+  function resolveOutlineItem(target) {
+    const outlineId = target.dataset.outlineId;
+    const title = normalizeText(target.getAttribute("title") || target.innerText || target.textContent || "");
+    let item = findItemById(outlineId);
+    if (item?.element?.isConnected) return item;
+
+    updateOutline();
+    item = findItemById(outlineId);
+    if (item?.element?.isConnected) return item;
+
+    return state.items.find((candidate) => {
+      return candidate.element?.isConnected && normalizeText(candidate.title) === title;
+    }) || null;
   }
 
   function observeHeadings() {
@@ -552,25 +862,18 @@
 
     if (!state.items.length) {
       state.activeId = null;
+      state.activeLockedUntil = 0;
       return;
     }
 
-    state.intersectionObserver = new IntersectionObserver(onHeadingIntersections, {
-      root: null,
-      rootMargin: "-18% 0px -68% 0px",
-      threshold: [0, 1]
-    });
-
-    state.items.forEach((item) => {
-      if (item.element?.isConnected) {
-        state.intersectionObserver.observe(item.element);
-      }
-    });
-
-    updateActiveByPosition();
+    if (!isActiveLocked()) {
+      updateActiveByPosition();
+    }
   }
 
   function onHeadingIntersections(entries) {
+    if (isActiveLocked()) return;
+
     const visibleEntry = entries
       .filter((entry) => entry.isIntersecting)
       .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
@@ -588,23 +891,52 @@
 
   function updateActiveByPosition() {
     if (!state.items.length) return;
+    if (isActiveLocked()) return;
+
+    const activeId = getActiveIdByPosition();
+    if (activeId) setActive(activeId, { scrollCard: false });
+  }
+
+  function getActiveIdByPosition() {
+    if (!state.items.length) return null;
 
     const anchor = Math.max(96, window.innerHeight * 0.22);
-    let current = state.items[0];
+    let current = null;
+    let firstVisibleAfterAnchor = null;
 
     state.items.forEach((item) => {
       if (!item.element?.isConnected) return;
       const rect = item.element.getBoundingClientRect();
-      if (rect.top <= anchor) current = item;
+      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return;
+
+      if (rect.top <= anchor) {
+        current = item;
+        return;
+      }
+
+      if (!firstVisibleAfterAnchor && rect.top <= window.innerHeight && rect.bottom >= 0) {
+        firstVisibleAfterAnchor = item;
+      }
     });
 
-    setActive(current.id);
+    return current?.id || firstVisibleAfterAnchor?.id || null;
   }
 
-  function setActive(id) {
-    if (state.activeId === id) return;
+  function setActive(id, options = {}) {
+    if (options.lock) {
+      state.activeLockedUntil = window.performance.now() + ACTIVE_LOCK_MS;
+    }
+
+    if (state.activeId === id) {
+      syncActiveElements({ scrollCard: options.scrollCard === true });
+      return;
+    }
 
     state.activeId = id;
+    syncActiveElements({ scrollCard: options.scrollCard === true });
+  }
+
+  function syncActiveElements(options = {}) {
     const root = document.getElementById(ROOT_ID);
     if (!root) return;
 
@@ -612,23 +944,33 @@
       element.classList.remove("is-active");
     });
 
-    root.querySelectorAll(`[data-outline-id="${cssEscape(id)}"]`).forEach((element) => {
+    if (!state.activeId) return;
+
+    root.querySelectorAll(`[data-outline-id="${cssEscape(state.activeId)}"]`).forEach((element) => {
       element.classList.add("is-active");
     });
 
-    const activeItem = root.querySelector(`.cgpt-outline__item[data-outline-id="${cssEscape(id)}"]`);
-    if (activeItem) {
+    const activeItem = root.querySelector(`.cgpt-outline__item[data-outline-id="${cssEscape(state.activeId)}"]`);
+    if (activeItem && options.scrollCard) {
       activeItem.scrollIntoView({
         block: "nearest"
       });
     }
   }
 
+  function isActiveLocked() {
+    if (!state.activeId) return false;
+    if (window.performance.now() >= state.activeLockedUntil) return false;
+
+    const activeItem = findItemById(state.activeId);
+    return Boolean(activeItem?.element?.isConnected);
+  }
+
   function findItemById(id) {
     return state.items.find((item) => item.id === id);
   }
 
-  function scrollToElement(element) {
+  function scrollToElement(element, activeId) {
     if (state.scrollAnimationFrame) {
       window.cancelAnimationFrame(state.scrollAnimationFrame);
     }
@@ -659,6 +1001,10 @@
         state.scrollAnimationFrame = window.requestAnimationFrame(step);
       } else {
         state.scrollAnimationFrame = null;
+        if (activeId && state.activeId === activeId) {
+          state.activeLockedUntil = 0;
+          updateActiveByPosition();
+        }
       }
     }
 
@@ -723,6 +1069,23 @@
     return id;
   }
 
+  function uniqueElementsByIdentity(elements) {
+    const seen = new Set();
+
+    return elements.filter((element) => {
+      if (seen.has(element)) return false;
+      seen.add(element);
+      return true;
+    });
+  }
+
+  function compareDocumentOrder(a, b) {
+    const position = a.compareDocumentPosition(b);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  }
+
   function uniqueOuterElements(elements) {
     const unique = [];
 
@@ -734,12 +1097,7 @@
       unique.push(element);
     });
 
-    return unique.sort((a, b) => {
-      const position = a.compareDocumentPosition(b);
-      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-      if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-      return 0;
-    });
+    return unique.sort(compareDocumentOrder);
   }
 
   function barLevel(level) {
@@ -773,6 +1131,17 @@
 
   function stripMarkdownPrefix(text) {
     return normalizeText(text).replace(/^#{1,6}\s*/, "");
+  }
+
+  function hashString(value) {
+    let hash = 5381;
+    const text = String(value);
+
+    for (let i = 0; i < text.length; i += 1) {
+      hash = ((hash << 5) + hash) ^ text.charCodeAt(i);
+    }
+
+    return (hash >>> 0).toString(36);
   }
 
   function cssEscape(value) {
