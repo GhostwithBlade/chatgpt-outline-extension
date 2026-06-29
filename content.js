@@ -12,6 +12,8 @@
   const MIN_JUMP_TOP_OFFSET = 88;
   const JUMP_TOP_GAP = 36;
   const MAX_ITEMS = 80;
+  const CACHE_POSITION_MATCH_TOLERANCE = 96;
+  const CACHE_SCROLL_RECONNECT_DELAY_MS = 220;
   const NATIVE_OUTLINE_STYLE_ID = "cgpt-native-outline-blocker-style";
   const NATIVE_OUTLINE_HIDDEN_ATTR = "data-cgpt-native-outline-hidden";
   const NATIVE_OUTLINE_BLOCK_DELAY_MS = 120;
@@ -49,7 +51,10 @@
     intersectionObserver: null,
     scrollAnimationFrame: null,
     outlineSignature: null,
-    activeLockedUntil: 0
+    activeLockedUntil: 0,
+    headingCache: new Map(),
+    nextCachedHeadingIndex: 1,
+    conversationKey: null
   };
 
   init();
@@ -631,6 +636,7 @@
   function updateOutline() {
     hideNativeChatGptOutline();
     refreshScrollContainers();
+    resetOutlineCacheIfConversationChanged();
 
     const nextItems = buildOutline();
     const nextSignature = getOutlineSignature(nextItems);
@@ -678,6 +684,22 @@
     });
   }
 
+  function resetOutlineCacheIfConversationChanged() {
+    const nextConversationKey = getConversationKey();
+    if (state.conversationKey === nextConversationKey) return;
+
+    state.conversationKey = nextConversationKey;
+    state.headingCache.clear();
+    state.nextCachedHeadingIndex = 1;
+    state.activeId = null;
+    state.activeLockedUntil = 0;
+    state.outlineSignature = null;
+  }
+
+  function getConversationKey() {
+    return `${location.origin}${location.pathname}${location.search}`;
+  }
+
   function refreshScrollContainers() {
     const nextContainers = new Set();
 
@@ -715,45 +737,149 @@
 
   function buildOutline() {
     const roots = findAssistantContentRoots();
-    const headingElements = [];
+    const visibleItems = [];
 
     roots.forEach((root) => {
       const candidates = getHeadingCandidates(root);
 
-      candidates.forEach((element) => {
+      candidates.forEach((element, headingIndex) => {
         if (!isUsableCandidate(element)) return;
-        headingElements.push(element);
+        const heading = classifyHeading(element);
+        if (!heading) return;
+
+        visibleItems.push({
+          cacheKey: getHeadingCacheKey(element, heading, headingIndex),
+          title: heading.title,
+          level: heading.level,
+          element,
+          headingIndex,
+          messageId: getHeadingMessageId(element),
+          position: getElementScrollPosition(element)
+        });
       });
     });
 
-    const countsByHeading = new Map();
-    const items = uniqueElementsByIdentity(headingElements)
-      .sort(compareDocumentOrder)
-      .map((element) => {
-        const heading = classifyHeading(element);
-        if (!heading) return null;
+    mergeVisibleItemsIntoCache(uniqueItemsByElement(visibleItems).sort(compareItemsByElementOrder));
+    return getCachedOutlineItems();
+  }
 
-        const headingKey = `${heading.level}-${heading.title}`;
-        const occurrence = countsByHeading.get(headingKey) || 0;
-        countsByHeading.set(headingKey, occurrence + 1);
+  function mergeVisibleItemsIntoCache(items) {
+    items.forEach((item) => {
+      const cachedItem = findCachedHeading(item) || createCachedHeading(item);
+      cachedItem.cacheKey = item.cacheKey;
+      cachedItem.messageId = item.messageId;
+      cachedItem.headingIndex = item.headingIndex;
+      cachedItem.title = item.title;
+      cachedItem.level = item.level;
+      cachedItem.element = item.element;
+      cachedItem.position = item.position;
+      cachedItem.lastSeenAt = window.performance.now();
+      item.element.dataset.cgptOutlineId = cachedItem.id;
+    });
 
-        const id = getStableOutlineKey(heading, occurrence);
-        element.dataset.cgptOutlineId = id;
+    dedupeHeadingCache();
+  }
 
+  function findCachedHeading(item) {
+    if (item.cacheKey) {
+      const cachedByKey = state.headingCache.get(item.cacheKey);
+      if (cachedByKey) return cachedByKey;
+    }
+
+    let fallback = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    state.headingCache.forEach((cachedItem) => {
+      if (cachedItem.cacheKey && item.cacheKey && cachedItem.cacheKey !== item.cacheKey) return;
+      if (cachedItem.title !== item.title || cachedItem.level !== item.level) return;
+      if (cachedItem.element === item.element) {
+        fallback = cachedItem;
+        nearestDistance = 0;
+        return;
+      }
+
+      const distance = Math.abs((cachedItem.position || 0) - (item.position || 0));
+      if (distance > CACHE_POSITION_MATCH_TOLERANCE || distance >= nearestDistance) return;
+      fallback = cachedItem;
+      nearestDistance = distance;
+    });
+
+    return fallback;
+  }
+
+  function createCachedHeading(item) {
+    const cacheIndex = state.nextCachedHeadingIndex;
+    state.nextCachedHeadingIndex += 1;
+
+    const cachedItem = {
+      id: getStableOutlineKey(item, cacheIndex),
+      cacheKey: item.cacheKey,
+      title: item.title,
+      level: item.level,
+      element: item.element,
+      messageId: item.messageId,
+      headingIndex: item.headingIndex,
+      position: item.position,
+      firstSeenOrder: cacheIndex,
+      lastSeenAt: window.performance.now()
+    };
+
+    state.headingCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
+    return cachedItem;
+  }
+
+  function dedupeHeadingCache() {
+    const byIdentity = new Map();
+
+    state.headingCache.forEach((cachedItem, cacheMapKey) => {
+      const identity = cachedItem.cacheKey || cacheMapKey;
+      const existing = byIdentity.get(identity);
+      if (!existing || existing.lastSeenAt < cachedItem.lastSeenAt) {
+        byIdentity.set(identity, cachedItem);
+      }
+    });
+
+    if (byIdentity.size === state.headingCache.size) return;
+
+    state.headingCache.clear();
+    byIdentity.forEach((cachedItem) => {
+      state.headingCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
+    });
+  }
+
+  function getCachedOutlineItems() {
+    return Array.from(state.headingCache.values())
+      .sort(compareCachedHeadings)
+      .slice(0, MAX_ITEMS)
+      .map((cachedItem) => {
         return {
-          id,
-          title: heading.title,
-          level: heading.level,
-          element
+          id: cachedItem.id,
+          title: cachedItem.title,
+          level: cachedItem.level,
+          element: cachedItem.element,
+          cacheKey: cachedItem.cacheKey,
+          messageId: cachedItem.messageId,
+          headingIndex: cachedItem.headingIndex,
+          position: cachedItem.position
         };
-      })
-      .filter(Boolean);
-
-    return items.slice(0, MAX_ITEMS);
+      });
   }
 
   function getStableOutlineKey(heading, occurrence) {
-    return `cgpt-outline-h-${hashString(`${heading.level}-${heading.title}`)}-${occurrence}`;
+    return `cgpt-outline-h-${hashString(`${heading.cacheKey || `${heading.level}-${heading.title}-${occurrence}`}`)}`;
+  }
+
+  function getHeadingCacheKey(element, heading, headingIndex) {
+    const messageId = getHeadingMessageId(element);
+    if (messageId) {
+      return `${messageId}\u0000${headingIndex}\u0000${heading.level}`;
+    }
+
+    return "";
+  }
+
+  function getHeadingMessageId(element) {
+    return element.closest('[data-message-author-role="assistant"]')?.getAttribute("data-message-id") || "";
   }
 
   function findAssistantContentRoots() {
@@ -882,24 +1008,28 @@
     event.stopPropagation();
 
     const item = resolveOutlineItem(target);
-    if (!item?.element?.isConnected) return;
+    if (!item) return;
 
     setActive(item.id, { lock: true, scrollCard: true });
-    scrollToElement(item.element, item.id);
+    if (item.element?.isConnected) {
+      scrollToElement(item.element, item.id);
+    } else {
+      scrollToCachedItem(item);
+    }
   }
 
   function resolveOutlineItem(target) {
     const outlineId = target.dataset.outlineId;
     const title = normalizeText(target.getAttribute("title") || target.innerText || target.textContent || "");
     let item = findItemById(outlineId);
-    if (item?.element?.isConnected) return item;
+    if (item) return item;
 
     updateOutline();
     item = findItemById(outlineId);
-    if (item?.element?.isConnected) return item;
+    if (item) return item;
 
     return state.items.find((candidate) => {
-      return candidate.element?.isConnected && normalizeText(candidate.title) === title;
+      return normalizeText(candidate.title) === title;
     }) || null;
   }
 
@@ -1018,6 +1148,48 @@
     return state.items.find((item) => item.id === id);
   }
 
+  function scrollToCachedItem(item) {
+    if (!Number.isFinite(item.position)) return;
+
+    const scroller = findMainScrollContainer();
+    const isWindowScroller = scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
+    const targetY = Math.max(0, item.position - getJumpTopOffset());
+
+    if (isWindowScroller) {
+      window.scrollTo(0, targetY);
+    } else {
+      scroller.scrollTop = targetY;
+    }
+
+    window.setTimeout(() => {
+      updateOutline();
+      const reconnectedItem = findReconnectedCachedItem(item);
+      if (reconnectedItem?.element?.isConnected) {
+        setActive(reconnectedItem.id, { scrollCard: true });
+        scrollToElement(reconnectedItem.element, reconnectedItem.id);
+      } else if (state.activeId === item.id) {
+        state.activeLockedUntil = 0;
+        updateActiveByPosition();
+      }
+    }, CACHE_SCROLL_RECONNECT_DELAY_MS);
+  }
+
+  function findReconnectedCachedItem(item) {
+    const directMatch = findItemById(item.id);
+    if (directMatch?.element?.isConnected) return directMatch;
+
+    return state.items
+      .filter((candidate) => {
+        return candidate.element?.isConnected &&
+          candidate.title === item.title &&
+          candidate.level === item.level;
+      })
+      .sort((a, b) => {
+        return Math.abs((a.position || 0) - (item.position || 0)) -
+          Math.abs((b.position || 0) - (item.position || 0));
+      })[0] || directMatch;
+  }
+
   function scrollToElement(element, activeId) {
     if (state.scrollAnimationFrame) {
       window.cancelAnimationFrame(state.scrollAnimationFrame);
@@ -1076,6 +1248,42 @@
     return document.scrollingElement || document.documentElement;
   }
 
+  function findMainScrollContainer() {
+    const main = document.querySelector("main");
+    const candidates = Array.from(state.scrollContainers)
+      .filter((element) => element?.isConnected)
+      .sort((a, b) => {
+        return getScrollableScore(b, main) - getScrollableScore(a, main);
+      });
+
+    return candidates[0] || document.scrollingElement || document.documentElement;
+  }
+
+  function getScrollableScore(element, main) {
+    const rect = element.getBoundingClientRect();
+    const containsMain = main && (element.contains(main) || main.contains(element)) ? 1 : 0;
+    const nearFullHeight = rect.height >= window.innerHeight * 0.6 ? 1 : 0;
+    const wideEnough = rect.width >= window.innerWidth * 0.45 ? 1 : 0;
+
+    return (containsMain * 100000000) +
+      (wideEnough * 10000000) +
+      (nearFullHeight * 1000000) +
+      element.scrollHeight;
+  }
+
+  function getElementScrollPosition(element) {
+    const scroller = findScrollContainer(element);
+    const isWindowScroller = scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
+    const elementRect = element.getBoundingClientRect();
+
+    if (isWindowScroller) {
+      return (window.scrollY || window.pageYOffset || 0) + elementRect.top;
+    }
+
+    const scrollerRect = scroller.getBoundingClientRect();
+    return scroller.scrollTop + elementRect.top - scrollerRect.top;
+  }
+
   function getJumpTopOffset() {
     const topObstructionBottom = Array.from(document.body.querySelectorAll("*")).reduce((maxBottom, element) => {
       if (element.id === ROOT_ID) return maxBottom;
@@ -1115,6 +1323,28 @@
     }
 
     return id;
+  }
+
+  function uniqueItemsByElement(items) {
+    const seen = new Set();
+
+    return items.filter((item) => {
+      if (seen.has(item.element)) return false;
+      seen.add(item.element);
+      return true;
+    });
+  }
+
+  function compareItemsByElementOrder(a, b) {
+    return compareDocumentOrder(a.element, b.element);
+  }
+
+  function compareCachedHeadings(a, b) {
+    const aPosition = Number.isFinite(a.position) ? a.position : Number.POSITIVE_INFINITY;
+    const bPosition = Number.isFinite(b.position) ? b.position : Number.POSITIVE_INFINITY;
+
+    if (aPosition !== bPosition) return aPosition - bPosition;
+    return a.firstSeenOrder - b.firstSeenOrder;
   }
 
   function uniqueElementsByIdentity(elements) {
