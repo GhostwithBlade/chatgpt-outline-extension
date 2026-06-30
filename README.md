@@ -55,7 +55,7 @@ After updating local files, reload the extension in `chrome://extensions` and re
 - `popup.html`, `popup.css`, `popup.js`: Toolbar popup mode switch.
 - `icons/`: Extension icons.
 - `assets/preview.svg`: README preview image.
-- `chatgpt-outline-v0.1.20.zip`: Packaged extension build.
+- [Latest release download](https://github.com/GhostwithBlade/chatgpt-outline-extension/releases/latest): Packaged extension build.
 
 </details>
 

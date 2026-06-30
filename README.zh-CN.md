@@ -53,7 +53,7 @@ ChatGPT Outline 适合经常让 ChatGPT 写方案、做调研、解释代码、�
 - `popup.html`、`popup.css`、`popup.js`：工具栏弹窗模式开关。
 - `icons/`：扩展图标。
 - `assets/preview.svg`：README 预览图。
-- `chatgpt-outline-v0.1.20.zip`：当前打包后的扩展文件。
+- [最新版本下载](https://github.com/GhostwithBlade/chatgpt-outline-extension/releases/latest)：当前打包后的扩展文件。
 
 </details>
 
