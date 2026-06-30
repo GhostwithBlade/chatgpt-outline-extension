@@ -265,6 +265,7 @@
 
   function hideNativeChatGptOutline() {
     restoreProtectedLeftSidebar();
+    restoreProtectedMediaArtifacts();
 
     const candidates = findNativeOutlineCandidates();
 
@@ -326,7 +327,11 @@
   }
 
   function getNativeOutlineHideTarget(element) {
-    if (!element || isInsideExtension(element) || isInsideMessage(element) || hasProtectedLeftSidebarAncestor(element)) return null;
+    if (!element ||
+      isInsideExtension(element) ||
+      isInsideMessage(element) ||
+      hasProtectedLeftSidebarAncestor(element) ||
+      isMediaArtifactElement(element)) return null;
 
     if (isNativePromptRailContainer(element)) return element;
     if (isNativeOutlineLikeContainer(element)) return element;
@@ -342,7 +347,7 @@
       current = current.parentElement;
     }
 
-    return hasNativeOutlineSignal(element) ? element : null;
+    return null;
   }
 
   function findSidePanelAncestor(element) {
@@ -352,6 +357,7 @@
     while (current && current !== document.body && current !== document.documentElement) {
       if (isInsideExtension(current) || isInsideMessage(current)) return null;
       if (isProtectedLeftSidebar(current)) return null;
+      if (isMediaArtifactElement(current)) return null;
       if (isSidePanelContainer(current, { allowPositionalMatch: candidateHasNativeSignal })) return current;
       current = current.parentElement;
     }
@@ -362,6 +368,7 @@
   function isNativeOutlineLikeContainer(element) {
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (isProtectedLeftSidebar(element)) return false;
+    if (isMediaArtifactElement(element)) return false;
     if (!hasNativeOutlineSignal(element) && !hasConversationOutlineSignal(element)) return false;
 
     const tag = element.tagName.toLowerCase();
@@ -378,6 +385,7 @@
 
   function isSidePanelContainer(element, options = {}) {
     if (isProtectedLeftSidebar(element)) return false;
+    if (isMediaArtifactElement(element)) return false;
 
     const tag = element.tagName.toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
@@ -397,6 +405,7 @@
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (!isVisible(element)) return false;
     if (hasProtectedLeftSidebarAncestor(element)) return false;
+    if (isMediaArtifactElement(element)) return false;
     if (!isFixedOrStickySidePanel(element, { side: "right" }) && !isRightSideLayoutPanel(element)) return false;
     return hasConversationOutlineSignal(element);
   }
@@ -405,6 +414,7 @@
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (!isVisible(element)) return false;
     if (isProtectedLeftSidebar(element) || hasProtectedLeftSidebarAncestor(element)) return false;
+    if (isMediaArtifactElement(element)) return false;
     if (!isFixedOrStickySidePanel(element, { side: "right" })) return false;
 
     const rect = element.getBoundingClientRect();
@@ -442,6 +452,17 @@
   function restoreProtectedLeftSidebar() {
     document.querySelectorAll(`[${NATIVE_OUTLINE_HIDDEN_ATTR}="true"]`).forEach((element) => {
       if (!isProtectedLeftSidebar(element)) return;
+
+      element.removeAttribute(NATIVE_OUTLINE_HIDDEN_ATTR);
+      if (element.style.getPropertyValue("display") === "none") {
+        element.style.removeProperty("display");
+      }
+    });
+  }
+
+  function restoreProtectedMediaArtifacts() {
+    document.querySelectorAll(`[${NATIVE_OUTLINE_HIDDEN_ATTR}="true"]`).forEach((element) => {
+      if (!isMediaArtifactElement(element)) return;
 
       element.removeAttribute(NATIVE_OUTLINE_HIDDEN_ATTR);
       if (element.style.getPropertyValue("display") === "none") {
@@ -647,6 +668,7 @@
     if (!element || isInsideExtension(element) || isInsideMessage(element)) return false;
     if (!isVisible(element)) return false;
     if (isProtectedLeftSidebar(element) || hasProtectedLeftSidebarAncestor(element)) return false;
+    if (isMediaArtifactElement(element)) return false;
 
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
@@ -704,6 +726,24 @@
 
   function isInsideMessage(element) {
     return Boolean(element.closest?.("[data-message-author-role]"));
+  }
+
+  function isMediaArtifactElement(element) {
+    if (!element || isInsideExtension(element)) return false;
+
+    const mediaSelector = "img,picture,video,canvas,[role='img']";
+    if (element.matches?.(mediaSelector)) return true;
+    if (element.querySelector?.(mediaSelector)) return true;
+
+    const mediaAncestor = element.closest?.([
+      "figure",
+      "[data-testid*='image' i]",
+      "[aria-label*='image' i]",
+      "[aria-label*='图片']",
+      "[aria-label*='图像']"
+    ].join(","));
+
+    return Boolean(mediaAncestor?.querySelector?.(mediaSelector) || mediaAncestor?.matches?.(mediaSelector));
   }
 
   function scheduleUpdate() {
