@@ -2,7 +2,11 @@
   "use strict";
 
   const ROOT_ID = "cgpt-outline-root";
-  const EXTENSION_VERSION = "0.1.19";
+  const EXTENSION_VERSION = "0.1.20";
+  const OUTLINE_MODE_STORAGE_KEY = "outlineMode";
+  const OUTLINE_MODE_ASSISTANT = "assistant";
+  const OUTLINE_MODE_USER = "user";
+  const DEFAULT_OUTLINE_MODE = OUTLINE_MODE_ASSISTANT;
   const UPDATE_DELAY_MS = 450;
   const SCROLL_UPDATE_DELAY_MS = 120;
   const PERIODIC_UPDATE_MS = 650;
@@ -28,6 +32,8 @@
   const RIGHT_SIDE_PANEL_EDGE_GAP = 48;
   const RIGHT_SIDE_PANEL_COLUMN_GAP = 12;
   const NATIVE_PROMPT_RAIL_MIN_BUTTONS = 2;
+  const USER_PROMPT_TITLE_MAX_LENGTH = 64;
+  const ASSISTANT_HEADING_TITLE_MAX_LENGTH = 88;
   const NATIVE_OUTLINE_TERMS = [
     "outline",
     "conversation outline",
@@ -40,6 +46,7 @@
 
   const state = {
     items: [],
+    outlineMode: DEFAULT_OUTLINE_MODE,
     activeId: null,
     mutationTimer: null,
     nativeOutlineTimer: null,
@@ -52,8 +59,8 @@
     scrollAnimationFrame: null,
     outlineSignature: null,
     activeLockedUntil: 0,
-    headingCache: new Map(),
-    nextCachedHeadingIndex: 1,
+    outlineCache: new Map(),
+    nextCachedItemIndex: 1,
     conversationKey: null
   };
 
@@ -68,10 +75,86 @@
     injectNativeOutlineBlockerStyle();
     hideNativeChatGptOutline();
     injectOutline();
+    loadStoredOutlineMode();
+    observeOutlineModeChanges();
+    observeRuntimeMessages();
     updateOutline();
     observePageChanges();
     observeScrollChanges();
     observePeriodicChanges();
+  }
+
+  function loadStoredOutlineMode() {
+    if (!globalThis.chrome?.storage?.local) return;
+
+    globalThis.chrome.storage.local.get({ [OUTLINE_MODE_STORAGE_KEY]: DEFAULT_OUTLINE_MODE }, (result) => {
+      const nextMode = normalizeOutlineMode(result?.[OUTLINE_MODE_STORAGE_KEY]);
+      applyOutlineMode(nextMode);
+    });
+  }
+
+  function observeOutlineModeChanges() {
+    if (!globalThis.chrome?.storage?.onChanged) return;
+
+    globalThis.chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local") return;
+      const change = changes[OUTLINE_MODE_STORAGE_KEY];
+      if (!change) return;
+      applyOutlineMode(normalizeOutlineMode(change.newValue));
+    });
+  }
+
+  function observeRuntimeMessages() {
+    if (!globalThis.chrome?.runtime?.onMessage) return;
+
+    globalThis.chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (!message || typeof message !== "object") return false;
+
+      if (message.type === "cgpt-outline-set-mode") {
+        const mode = applyOutlineMode(normalizeOutlineMode(message.mode));
+        sendResponse?.({ ok: true, mode });
+        return false;
+      }
+
+      if (message.type === "cgpt-outline-toggle-mode") {
+        const mode = applyOutlineMode(getNextOutlineMode(state.outlineMode));
+        persistOutlineMode(mode);
+        sendResponse?.({ ok: true, mode });
+        return false;
+      }
+
+      if (message.type === "cgpt-outline-get-mode") {
+        sendResponse?.({ ok: true, mode: state.outlineMode });
+        return false;
+      }
+
+      return false;
+    });
+  }
+
+  function applyOutlineMode(mode) {
+    const nextMode = normalizeOutlineMode(mode);
+    if (state.outlineMode === nextMode) return state.outlineMode;
+
+    state.outlineMode = nextMode;
+    clearOutlineCache();
+    updateOutline();
+    return state.outlineMode;
+  }
+
+  function persistOutlineMode(mode) {
+    if (!globalThis.chrome?.storage?.local) return;
+    globalThis.chrome.storage.local.set({ [OUTLINE_MODE_STORAGE_KEY]: normalizeOutlineMode(mode) });
+  }
+
+  function normalizeOutlineMode(mode) {
+    return mode === OUTLINE_MODE_USER ? OUTLINE_MODE_USER : OUTLINE_MODE_ASSISTANT;
+  }
+
+  function getNextOutlineMode(mode) {
+    return normalizeOutlineMode(mode) === OUTLINE_MODE_ASSISTANT
+      ? OUTLINE_MODE_USER
+      : OUTLINE_MODE_ASSISTANT;
   }
 
   function injectOutline() {
@@ -79,11 +162,11 @@
     root.id = ROOT_ID;
     root.className = "cgpt-outline";
     root.dataset.cgptOutlineVersion = EXTENSION_VERSION;
-    root.setAttribute("aria-label", "Assistant response outline");
+    root.setAttribute("aria-label", getOutlineAriaLabel());
     root.innerHTML = `
       <div class="cgpt-outline__rail" aria-hidden="false"></div>
       <div class="cgpt-outline__bridge" aria-hidden="true"></div>
-      <nav class="cgpt-outline__card" aria-label="Assistant headings"></nav>
+      <nav class="cgpt-outline__card" aria-label="${escapeAttr(getOutlineAriaLabel())}"></nav>
     `;
 
     document.documentElement.appendChild(root);
@@ -689,8 +772,12 @@
     if (state.conversationKey === nextConversationKey) return;
 
     state.conversationKey = nextConversationKey;
-    state.headingCache.clear();
-    state.nextCachedHeadingIndex = 1;
+    clearOutlineCache();
+  }
+
+  function clearOutlineCache() {
+    state.outlineCache.clear();
+    state.nextCachedItemIndex = 1;
     state.activeId = null;
     state.activeLockedUntil = 0;
     state.outlineSignature = null;
@@ -736,6 +823,14 @@
   }
 
   function buildOutline() {
+    if (state.outlineMode === OUTLINE_MODE_USER) {
+      return buildUserPromptOutline();
+    }
+
+    return buildAssistantHeadingOutline();
+  }
+
+  function buildAssistantHeadingOutline() {
     const roots = findAssistantContentRoots();
     const visibleItems = [];
 
@@ -748,6 +843,7 @@
         if (!heading) return;
 
         visibleItems.push({
+          kind: OUTLINE_MODE_ASSISTANT,
           cacheKey: getHeadingCacheKey(element, heading, headingIndex),
           title: heading.title,
           level: heading.level,
@@ -763,10 +859,32 @@
     return getCachedOutlineItems();
   }
 
+  function buildUserPromptOutline() {
+    const visibleItems = findUserPromptElements().map((element, promptIndex) => {
+      const title = getUserPromptTitle(element, promptIndex);
+      if (!title) return null;
+
+      return {
+        kind: OUTLINE_MODE_USER,
+        cacheKey: getUserPromptCacheKey(element, promptIndex),
+        title,
+        level: 1,
+        element,
+        headingIndex: promptIndex,
+        messageId: getUserPromptMessageId(element),
+        position: getElementScrollPosition(element)
+      };
+    }).filter(Boolean);
+
+    mergeVisibleItemsIntoCache(uniqueItemsByElement(visibleItems).sort(compareItemsByElementOrder));
+    return getCachedOutlineItems();
+  }
+
   function mergeVisibleItemsIntoCache(items) {
     items.forEach((item) => {
-      const cachedItem = findCachedHeading(item) || createCachedHeading(item);
+      const cachedItem = findCachedOutlineItem(item) || createCachedOutlineItem(item);
       cachedItem.cacheKey = item.cacheKey;
+      cachedItem.kind = item.kind;
       cachedItem.messageId = item.messageId;
       cachedItem.headingIndex = item.headingIndex;
       cachedItem.title = item.title;
@@ -777,19 +895,20 @@
       item.element.dataset.cgptOutlineId = cachedItem.id;
     });
 
-    dedupeHeadingCache();
+    dedupeOutlineCache();
   }
 
-  function findCachedHeading(item) {
+  function findCachedOutlineItem(item) {
     if (item.cacheKey) {
-      const cachedByKey = state.headingCache.get(item.cacheKey);
+      const cachedByKey = state.outlineCache.get(item.cacheKey);
       if (cachedByKey) return cachedByKey;
     }
 
     let fallback = null;
     let nearestDistance = Number.POSITIVE_INFINITY;
 
-    state.headingCache.forEach((cachedItem) => {
+    state.outlineCache.forEach((cachedItem) => {
+      if (cachedItem.kind !== item.kind) return;
       if (cachedItem.cacheKey && item.cacheKey && cachedItem.cacheKey !== item.cacheKey) return;
       if (cachedItem.title !== item.title || cachedItem.level !== item.level) return;
       if (cachedItem.element === item.element) {
@@ -807,12 +926,13 @@
     return fallback;
   }
 
-  function createCachedHeading(item) {
-    const cacheIndex = state.nextCachedHeadingIndex;
-    state.nextCachedHeadingIndex += 1;
+  function createCachedOutlineItem(item) {
+    const cacheIndex = state.nextCachedItemIndex;
+    state.nextCachedItemIndex += 1;
 
     const cachedItem = {
       id: getStableOutlineKey(item, cacheIndex),
+      kind: item.kind,
       cacheKey: item.cacheKey,
       title: item.title,
       level: item.level,
@@ -824,14 +944,14 @@
       lastSeenAt: window.performance.now()
     };
 
-    state.headingCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
+    state.outlineCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
     return cachedItem;
   }
 
-  function dedupeHeadingCache() {
+  function dedupeOutlineCache() {
     const byIdentity = new Map();
 
-    state.headingCache.forEach((cachedItem, cacheMapKey) => {
+    state.outlineCache.forEach((cachedItem, cacheMapKey) => {
       const identity = cachedItem.cacheKey || cacheMapKey;
       const existing = byIdentity.get(identity);
       if (!existing || existing.lastSeenAt < cachedItem.lastSeenAt) {
@@ -839,21 +959,23 @@
       }
     });
 
-    if (byIdentity.size === state.headingCache.size) return;
+    if (byIdentity.size === state.outlineCache.size) return;
 
-    state.headingCache.clear();
+    state.outlineCache.clear();
     byIdentity.forEach((cachedItem) => {
-      state.headingCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
+      state.outlineCache.set(cachedItem.cacheKey || cachedItem.id, cachedItem);
     });
   }
 
   function getCachedOutlineItems() {
-    return Array.from(state.headingCache.values())
-      .sort(compareCachedHeadings)
+    return Array.from(state.outlineCache.values())
+      .filter((cachedItem) => cachedItem.kind === state.outlineMode)
+      .sort(compareCachedOutlineItems)
       .slice(0, MAX_ITEMS)
       .map((cachedItem) => {
         return {
           id: cachedItem.id,
+          kind: cachedItem.kind,
           title: cachedItem.title,
           level: cachedItem.level,
           element: cachedItem.element,
@@ -866,13 +988,14 @@
   }
 
   function getStableOutlineKey(heading, occurrence) {
-    return `cgpt-outline-h-${hashString(`${heading.cacheKey || `${heading.level}-${heading.title}-${occurrence}`}`)}`;
+    const prefix = heading.kind === OUTLINE_MODE_USER ? "u" : "h";
+    return `cgpt-outline-${prefix}-${hashString(`${heading.cacheKey || `${heading.kind}-${heading.level}-${heading.title}-${occurrence}`}`)}`;
   }
 
   function getHeadingCacheKey(element, heading, headingIndex) {
     const messageId = getHeadingMessageId(element);
     if (messageId) {
-      return `${messageId}\u0000${headingIndex}\u0000${heading.level}`;
+      return `${OUTLINE_MODE_ASSISTANT}\u0000${messageId}\u0000${headingIndex}\u0000${heading.level}`;
     }
 
     return "";
@@ -880,6 +1003,42 @@
 
   function getHeadingMessageId(element) {
     return element.closest('[data-message-author-role="assistant"]')?.getAttribute("data-message-id") || "";
+  }
+
+  function getUserPromptCacheKey(element, promptIndex) {
+    const messageId = getUserPromptMessageId(element);
+    if (messageId) return `${OUTLINE_MODE_USER}\u0000${messageId}`;
+    return `${OUTLINE_MODE_USER}\u0000${promptIndex}\u0000${getUserPromptTitle(element, promptIndex)}`;
+  }
+
+  function getUserPromptMessageId(element) {
+    return element.closest('[data-message-author-role="user"]')?.getAttribute("data-message-id") || "";
+  }
+
+  function findUserPromptElements() {
+    const main = document.querySelector("main") || document.body;
+
+    return Array.from(main.querySelectorAll('[data-message-author-role="user"]'))
+      .filter((element) => {
+        return !element.closest(`#${ROOT_ID}`) &&
+          isVisible(element) &&
+          Boolean(getUserPromptRawText(element));
+      });
+  }
+
+  function getUserPromptTitle(element, promptIndex) {
+    const text = getUserPromptRawText(element);
+    if (text) return truncate(text, USER_PROMPT_TITLE_MAX_LENGTH);
+    return `Prompt ${promptIndex + 1}`;
+  }
+
+  function getUserPromptRawText(element) {
+    const cloned = element.cloneNode(true);
+    cloned.querySelectorAll("button, svg, path, style, script, [aria-hidden='true']").forEach((node) => {
+      node.remove();
+    });
+
+    return normalizeText(cloned.innerText || cloned.textContent || "");
   }
 
   function findAssistantContentRoots() {
@@ -947,7 +1106,7 @@
     if (tag === "h1" || tag === "h2" || tag === "h3") {
       return {
         level: 1,
-        title: truncate(stripMarkdownPrefix(text), 88)
+        title: truncate(stripMarkdownPrefix(text), ASSISTANT_HEADING_TITLE_MAX_LENGTH)
       };
     }
 
@@ -959,10 +1118,14 @@
     if (!root) return;
 
     root.classList.toggle("is-empty", state.items.length === 0);
+    root.classList.toggle("is-user-mode", state.outlineMode === OUTLINE_MODE_USER);
+    root.dataset.outlineMode = state.outlineMode;
+    root.setAttribute("aria-label", getOutlineAriaLabel());
 
     const rail = root.querySelector(".cgpt-outline__rail");
     const card = root.querySelector(".cgpt-outline__card");
     if (!rail || !card) return;
+    card.setAttribute("aria-label", getOutlineAriaLabel());
 
     if (!state.items.length) {
       rail.innerHTML = "";
@@ -982,7 +1145,9 @@
       `;
     }).join("");
 
-    card.innerHTML = state.items.map((item) => {
+    card.innerHTML = `
+      <div class="cgpt-outline__title">${escapeHtml(getOutlineTitle())}</div>
+      ${state.items.map((item) => {
       return `
         <button
           class="cgpt-outline__item cgpt-outline__item--level-${item.level} ${state.activeId === item.id ? "is-active" : ""}"
@@ -993,9 +1158,18 @@
           ${escapeHtml(item.title)}
         </button>
       `;
-    }).join("");
+    }).join("")}
+    `;
 
     syncActiveElements();
+  }
+
+  function getOutlineTitle() {
+    return state.outlineMode === OUTLINE_MODE_USER ? "User prompts" : "Assistant outline";
+  }
+
+  function getOutlineAriaLabel() {
+    return state.outlineMode === OUTLINE_MODE_USER ? "User prompt outline" : "Assistant response outline";
   }
 
   function handleOutlineClick(event) {
@@ -1339,7 +1513,7 @@
     return compareDocumentOrder(a.element, b.element);
   }
 
-  function compareCachedHeadings(a, b) {
+  function compareCachedOutlineItems(a, b) {
     const aPosition = Number.isFinite(a.position) ? a.position : Number.POSITIVE_INFINITY;
     const bPosition = Number.isFinite(b.position) ? b.position : Number.POSITIVE_INFINITY;
 

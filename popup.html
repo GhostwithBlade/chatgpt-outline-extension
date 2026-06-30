@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ChatGPT Outline</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <div class="popup__header">
+        <div class="popup__title">ChatGPT Outline</div>
+        <div class="popup__shortcut">Alt+Shift+O</div>
+      </div>
+
+      <div class="mode-toggle" role="group" aria-label="Outline mode">
+        <button class="mode-toggle__button" type="button" data-mode="assistant">
+          助手大纲
+        </button>
+        <button class="mode-toggle__button" type="button" data-mode="user">
+          用户大纲
+        </button>
+      </div>
+
+      <p class="popup__status" id="status">仅在 ChatGPT 对话页生效</p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

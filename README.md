@@ -6,7 +6,7 @@
 
 ![ChatGPT Outline preview](assets/preview.svg)
 
-ChatGPT Outline turns long assistant answers into a calm right-side outline. It stays out of the way as small gray bars, expands into readable headings on hover, and lets you jump back to the section you need without losing your place.
+ChatGPT Outline turns long ChatGPT conversations into a calm right-side outline. It defaults to assistant response headings, can switch to user prompt navigation from the extension popup, and lets you jump back to the section or prompt you need without losing your place.
 
 ## Highlights
 
@@ -14,6 +14,7 @@ ChatGPT Outline turns long assistant answers into a calm right-side outline. It 
 - **Minimal by default**: The rail sits on the right edge as short markers, so it does not fight with the conversation.
 - **Hover to inspect**: Move your cursor over the rail to reveal a Notion-style outline card.
 - **Click to jump**: Select any heading and scroll directly to that part of the assistant response.
+- **Assistant / user modes**: Use the toolbar popup or `Alt+Shift+O` to switch between assistant headings and user prompts.
 - **Current section highlight**: The active marker follows your reading position.
 - **Streaming friendly**: The outline updates while ChatGPT is still generating.
 - **Avoids duplicate rails**: Hides ChatGPT's native conversation outline when it would overlap with this extension.
@@ -28,11 +29,11 @@ This extension is intentionally local and simple.
 - No conversation upload.
 - No bulk chat-history export.
 - Reads only the current ChatGPT page DOM.
-- Builds outline items only from assistant / GPT output headings.
+- Builds outline items from assistant / GPT headings by default, or user prompts when user mode is selected.
 
 ## How It Works
 
-ChatGPT Outline scans assistant messages on `chatgpt.com` and `chat.openai.com`, finds rendered headings, and chooses the highest available heading level for each response: `h1` first, then `h2`, then `h3`. User messages are ignored, so the outline stays focused on the answer content.
+ChatGPT Outline scans messages on `chatgpt.com` and `chat.openai.com`. Assistant mode finds rendered assistant headings and chooses the highest available heading level for each response: `h1` first, then `h2`, then `h3`. User mode lists user messages as prompt summaries. The selected mode is stored locally in Chrome and can be changed from the extension popup or with `Alt+Shift+O`.
 
 ## Local Install
 
@@ -48,11 +49,13 @@ After updating local files, reload the extension in `chrome://extensions` and re
 <summary>Files</summary>
 
 - `manifest.json`: Chrome Manifest V3 configuration.
-- `content.js`: DOM scanning, heading extraction, scroll navigation, and native outline blocking.
+- `content.js`: DOM scanning, outline mode handling, scroll navigation, and native outline blocking.
 - `content.css`: Right-side outline rail and hover card styling.
+- `background.js`: Keyboard shortcut handling.
+- `popup.html`, `popup.css`, `popup.js`: Toolbar popup mode switch.
 - `icons/`: Extension icons.
 - `assets/preview.svg`: README preview image.
-- `chatgpt-outline-v0.1.19.zip`: Packaged extension build.
+- `chatgpt-outline-v0.1.20.zip`: Packaged extension build.
 
 </details>
 
@@ -71,6 +74,5 @@ ChatGPT's page structure can change. If the outline stops working, check the sel
 ## Roadmap
 
 - Outline search.
-- Settings popup.
 - Export current outline as Markdown.
 - More resilient ChatGPT DOM adapter.
