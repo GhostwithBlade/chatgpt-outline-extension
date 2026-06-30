@@ -2,7 +2,7 @@
 
 > 给长篇 ChatGPT 回复加一个类似 Notion 的右侧大纲栏，轻量、安静、只在需要时展开。
 
-![ChatGPT Outline 预览](assets/preview.svg)
+![ChatGPT Outline 预览](assets/preview.png)
 
 ChatGPT Outline 适合经常让 ChatGPT 写方案、做调研、解释代码、整理长文档的人。它默认把助手回复里的标题提取成右侧大纲，也可以从扩展图标切换为用户提问大纲；平时只显示一列短灰色标记，鼠标悬停时展开为标题卡片，点击任意条目即可跳回对应段落或提问。
 
@@ -52,7 +52,7 @@ ChatGPT Outline 适合经常让 ChatGPT 写方案、做调研、解释代码、�
 - `background.js`：快捷键切换逻辑。
 - `popup.html`、`popup.css`、`popup.js`：工具栏弹窗模式开关。
 - `icons/`：扩展图标。
-- `assets/preview.svg`：README 预览图。
+- `assets/preview.png`：README 预览图。
 - [最新版本下载](https://github.com/GhostwithBlade/chatgpt-outline-extension/releases/latest)：当前打包后的扩展文件。
 
 </details>

@@ -4,7 +4,7 @@
 
 > A lightweight Chrome extension that adds a Notion-style outline rail to long ChatGPT conversations.
 
-![ChatGPT Outline preview](assets/preview.svg)
+![ChatGPT Outline preview](assets/preview.png)
 
 ChatGPT Outline turns long ChatGPT conversations into a calm right-side outline. It defaults to assistant response headings, can switch to user prompt navigation from the extension popup, and lets you jump back to the section or prompt you need without losing your place.
 
@@ -54,7 +54,7 @@ After updating local files, reload the extension in `chrome://extensions` and re
 - `background.js`: Keyboard shortcut handling.
 - `popup.html`, `popup.css`, `popup.js`: Toolbar popup mode switch.
 - `icons/`: Extension icons.
-- `assets/preview.svg`: README preview image.
+- `assets/preview.png`: README preview image.
 - [Latest release download](https://github.com/GhostwithBlade/chatgpt-outline-extension/releases/latest): Packaged extension build.
 
 </details>
